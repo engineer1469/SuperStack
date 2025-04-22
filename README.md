@@ -45,7 +45,7 @@
 
 ## ⚙️ Usage
 
-Make sure you have some frames in `Input/` (or a video / `.ser` file). Then:
+Make sure you have some frames in `Input/` (or a video / `.ser` file). I used the following datasets for testing: [planetary-imaging-free-ser-file](https://www.cloudynights.com/topic/903741-the-planetary-imaging-free-ser-file-thread). Then:
 
 ```bash
 # default Input/ → Output/<basename>.png
