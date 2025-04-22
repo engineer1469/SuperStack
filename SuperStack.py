@@ -116,13 +116,40 @@ def unsharp_mask(img, ksize=(5,5), sigma=1.0, amount=1.5, thresh=0):
     return sharp
 
 def load_frames_from_ser(path):
-    ser = reader(path)  # parse SER header & metadata
+    ser = reader(path)  # parses header & metadata
     frames = []
     for i in range(ser.header.frameCount):
-        img = ser.getImg(i)
-        if ser.header.numPlanes == 1 and ser.header.colorMode == 1:
-            img = cv2.cvtColor(img, cv2.COLOR_BAYER_GR2RGB)
+        img = ser.getImg(i)  # H×W×numPlanes uint8/uint16
+
+        # If single‐plane, it’s mono (colorID=0) or Bayer (8–11)
+        if ser.header.numPlanes == 1:
+            cid = ser.header.colorID
+            if cid == 0:
+                # pure mono → convert to BGR so rest of pipeline sees 3 channels
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            elif cid in (8,9,10,11):
+                # standard Bayer patterns → choose correct demosaic code
+                bayer_code = {
+                  8:  cv2.COLOR_BAYER_RG2BGR,   # RGGB
+                  9:  cv2.COLOR_BAYER_GR2BGR,   # GRBG
+                  10: cv2.COLOR_BAYER_GB2BGR,   # GBRG
+                  11: cv2.COLOR_BAYER_BG2BGR    # BGGR
+                }[cid]
+                img = cv2.cvtColor(img, bayer_code)
+            else:
+                # unknown single‐plane → treat as gray
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+        # If three planes, it’s already color (100=RGB, 101=BGR)
+        else:
+            cid = ser.header.colorID
+            if cid == 100:
+                # convert RGB→BGR
+                img = img[..., ::-1]
+            # if 101 (BGR) we’re good
+
         frames.append(img)
+
     return frames
 
 def main():
@@ -143,7 +170,19 @@ def main():
     p.add_argument('--output', help="Output filename", default=default_output)
     args = p.parse_args()
 
-    os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
+    # ensure Output dir exists
+    out_dir = os.path.dirname(args.output) or '.'
+    os.makedirs(out_dir, exist_ok=True)
+
+    # if user didn’t override --output, derive it from the input name
+    if args.output == default_output:
+        if args.input_ser:
+            base = os.path.splitext(os.path.basename(args.input_ser))[0]
+        elif args.input_video:
+            base = os.path.splitext(os.path.basename(args.input_video))[0]
+        else:
+            base = os.path.basename(os.path.normpath(args.input_folder))
+        args.output = os.path.join(out_dir, f"{base}.png")
 
     # Load frames based on input type:
     if args.input_ser:
