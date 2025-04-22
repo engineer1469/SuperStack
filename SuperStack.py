@@ -42,8 +42,9 @@ def load_frames_from_video(video_path):
     cap.release()
 
 def laplacian_score(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    return cv2.Laplacian(gray, cv2.CV_64F).var()
+    yuv = cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
+    y = yuv[...,0]
+    return cv2.Laplacian(y, cv2.CV_64F).var()
 
 def filter_by_quality(imgs, lap_thresh=None, top_percent=None):
     scores = [laplacian_score(im) for im in tqdm(imgs, desc="Scoring")]
