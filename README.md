@@ -1,107 +1,133 @@
 # SuperStack
 
 > **Multi‑frame super‑resolution & denoising via stacking**  
-> Pure signal processing—no AI. Supports image folders, video files and `.ser` clips.
+> Pure signal processing—no AI. Supports image folders, video files, and `.ser` clips,  
+> now with classical super‑resolution (RL) & wavelet sharpening, plus progress bars.
 
 ---
 
 ## 🚀 Features
 
-- **Quality filtering**: reject blurry frames by  
-  - **Laplacian variance** (`--lap-thresh`)  
+- **Quality filtering**  
+  - **Laplacian variance** (`--lap-thresh`) on luma  
   - **Top‑N% sharpest** (`--top-percent`)
 - **Alignment**  
-  - **ECC** (sub‑pixel translation / Euclidean)  
+  - **ECC** (sub‑pixel translation/Euclidean)  
   - **ORB+RANSAC** (rotation, scale, homography)
 - **Stacking**  
-  - **Average** (classic SNR ↑√N)  
-  - **Median** (robust to outliers like passing birds)
-- **Sharpening**: unsharp mask boost (`--unsharp-amount`)
+  - **Average** (SNR ↑√N)  
+  - **Median** (robust to outliers)
+- **Sharpening**  
+  - **Unsharp mask** (`--unsharp-amount`)
+  - **Wavelet pyramid boost** (`--wavelet-levels`, `--wavelet-boost`)
+- **Super‑Resolution**  
+  - **Drizzle‑style upsample** (`--sr-upscale`)  
+  - **Richardson–Lucy deconvolution** (`--sr-iterations`, `--psf-size`, `--psf-sigma`)
+- **Progress bars** via `tqdm` on all heavy loops
 - **Input types**  
   - Folder of images (`--input-folder`)  
   - Video file (`--input-video`)  
-  - `.ser` astronomical clips (`--input-ser`) via [pySER‑Reader](https://github.com/Copper280z/pySER-Reader)
-- **Defaults & conventions**  
-  - `Input/` folder & `Output/` directory by default  
-  - Output is named after your input (e.g. `2022-12-10-0254.png`)
+  - `.ser` astronomical clips (`--input-ser`)
+- **Defaults**  
+  - **Input/** folder & **Output/** directory  
+  - Auto‑naming: output matches input base name
 
 ---
 
 ## 💾 Installation
 
-1. **Clone the repo**  
-   ```bash
-   git clone https://github.com/yourname/SuperStack.git
-   cd SuperStack
-   ```
-2. **Install dependencies**  
-   ```bash
-   pip install numpy opencv-python tqdm
-   ```
-3. **(SER support)**  
-   - Copy `ser_reader.py` from [pySER‑Reader](https://github.com/Copper280z/pySER-Reader) into this folder.
+```bash
+git clone https://github.com/yourname/SuperStack.git
+cd SuperStack
+pip install numpy opencv-python tqdm
+# (for .ser support)
+# copy ser_reader.py from https://github.com/Copper280z/pySER-Reader into this folder
+```
 
 ---
 
 ## ⚙️ Usage
 
-Make sure you have some frames in `Input/` (or a video / `.ser` file). I used the following datasets for testing: [planetary-imaging-free-ser-file](https://www.cloudynights.com/topic/903741-the-planetary-imaging-free-ser-file-thread). Then:
+Drop frames into `Input/` (or specify a video/.ser). Then run:
 
 ```bash
-# default Input/ → Output/<basename>.png
 python SuperStack.py
-
-# from a .ser clip
-python SuperStack.py --input-ser Input/2022-12-10-0254_3.ser
-
-# custom folder + top‑10% sharpest + ORB alignment
-python SuperStack.py   --input-folder MyFrames   --top-percent 10   --align-method ORB   --output Output/result.png
-
-# extract from video
-python SuperStack.py --input-video clip.mp4 --lap-thresh 50
 ```
+
+By default, frames in `Input/` are scored → aligned → stacked → sharpened → saved as `Output/<base>.png`.
+
+### Examples
+
+- **Stack a .ser clip**  
+  ```bash
+  python SuperStack.py --input-ser Input/2022-12-10-0254_3.ser
+  ```
+- **Use top 0.5% sharpest frames + ORB**  
+  ```bash
+  python SuperStack.py     --input-folder MyFrames     --top-percent 0.5     --align-method ORB     --output Output/result.png
+  ```
+- **Apply 2× super‑res + 10 RL iters + wavelet sharpen**  
+  ```bash
+  python SuperStack.py     --input-ser Input/2022-12-10-0254_3.ser     --top-percent   0.5     --align-method  ECC     --stack-method  average     --sr-upscale    2     --sr-iterations 10     --psf-size      5     --psf-sigma     1.2     --wavelet-levels 2     --wavelet-boost 1.1     --unsharp-amount 1.3     --output        Output/mars_tuned.png
+  ```
+
+---
 
 ### CLI Flags
 
-| Flag                   | What it does                                        | Default         |
-|------------------------|------------------------------------------------------|-----------------|
-| `--input-folder PATH`  | Folder of images (glob .jpg/.png/.tif)               | `Input/`        |
-| `--input-video FILE`   | Video file to extract frames from                    | —               |
-| `--input-ser FILE`     | `.ser` file to load via pySER‑Reader                 | —               |
-| `--lap-thresh FLOAT`   | Reject frames below this Laplacian variance          | *off*           |
-| `--top-percent FLOAT`  | Keep top P% of sharpest frames                       | *off*           |
-| `--align-method STR`   | `ECC` or `ORB`                                       | `ECC`           |
-| `--stack-method STR`   | `average` or `median`                                | `average`       |
-| `--unsharp-amount FLT` | Amount for unsharp mask                              | `1.5`           |
-| `--output FILE`        | Output filename (`.png`/`.jpg`)                      | `Output/<base>.png` |
+| Flag                        | Description                                        | Default          |
+|-----------------------------|----------------------------------------------------|------------------|
+| `--input-folder PATH`       | Folder of images (`*.jpg`,`*.png`,`*.tif`)         | `Input/`         |
+| `--input-video FILE`        | Video file to extract frames                       | —                |
+| `--input-ser FILE`          | `.ser` file to load via pySER‑Reader               | —                |
+| `--lap-thresh FLOAT`        | Luma-Laplacian variance threshold to reject blur   | *off*            |
+| `--top-percent FLOAT`       | Keep top P% of sharpest frames                     | *off*            |
+| `--align-method {ECC,ORB}`  | Alignment algorithm                                | `ECC`            |
+| `--stack-method {average,median}` | Stacking method                               | `average`        |
+| `--unsharp-amount FLOAT`    | Unsharp mask amount                                | `1.5`            |
+| `--sr-upscale INT`          | Super‑res upsample factor (1=off)                  | `1`              |
+| `--sr-iterations INT`       | Richardson–Lucy deconv iterations (0=off)          | `0`              |
+| `--psf-size INT`            | Gaussian PSF kernel size for RL                    | `5`              |
+| `--psf-sigma FLOAT`         | Gaussian PSF σ                                       | `1.0`            |
+| `--wavelet-levels INT`      | Wavelet pyramid levels for sharpening (0=off)      | `0`              |
+| `--wavelet-boost FLOAT`     | Boost factor for wavelet bands                     | `1.2`            |
+| `--output FILE`             | Output filename (`.png`/`.jpg`)                    | `Output/<base>.png` |
 
 ---
 
 ## 🛠 Under the Hood
 
-1. **Load** frames (images / video / SER)  
-2. **Score & filter** by blur metric  
-3. **Register** all kept frames to a reference  
-4. **Stack** (mean or median) → high SNR result  
-5. **Sharpen** via unsharp mask → crisp details  
-6. **Save** with auto‑naming
+1. **Load** images/video/SER frames  
+2. **Score** luma sharpness & filter  
+3. **Align** frames (ECC or ORB)  
+4. **Stack** (mean/median) → high SNR  
+5. **Super‑res** (optional RL deconv)  
+6. **Wavelet** sharpen (optional multi-scale boost)  
+7. **Unsharp mask** → final crisp image  
+8. **Save** & auto‑name
 
 ---
 
 ## ⚡ Performance Tips
 
-- **Coarse‑to‑fine ECC** (pyramid) → 3–5× speedup  
-- **Translation‑only** if no rotation → 2× faster  
-- **ROI crop** (center region) → focus warp on your target  
-- **Parallel align** with `concurrent.futures` → ~linear core scaling  
+- **Pyramid ECC** for speed  
+- **Translation‑only** if no rotation  
+- **ROI crop** around target  
+- **Parallelize** align/stack with `concurrent.futures`
+
+---
+
+## 🧪 Mars Reference
+
+The **Mars‑tuned** command above picks 0.5% sharpest of ~32 k frames, 2× super‑res, 10 RL iters, 2‑level wavelet, then unsharp mask—ideal for your `Input/2022-12-10-0254_3.ser` data.
 
 ---
 
 ## 🤝 Contributing
 
 1. Fork & branch  
-2. Add tests under `tests/`  
-3. Send a PR with a clear description
+2. Add tests in `tests/`  
+3. Send a PR
 
 ---
 
