@@ -107,6 +107,27 @@ def stack_images(imgs, method='average'):
         res = np.mean(arr, axis=0)
     return np.clip(res, 0, 255).astype(np.uint8)
 
+def generate_psf(size=5, sigma=1.0):
+    """Create a Gaussian PSF kernel of given size & σ."""
+    g = cv2.getGaussianKernel(size, sigma)
+    return g @ g.T      # outer product → 2D kernel
+
+def richardson_lucy(img, psf, iterations=10):
+    """
+    Perform Richardson–Lucy deconvolution on a uint8 BGR image.
+    Returns float32 image (0–255) that you should clip & cast.
+    """
+    img = img.astype(np.float32) + 1e-6
+    estimate = cv2.resize(img, None, fx=1, fy=1)  # copy as float32
+    psf_mirror = psf[::-1, ::-1]
+    for _ in range(iterations):
+        # Convolve estimate with PSF
+        conv = cv2.filter2D(estimate, -1, psf, borderType=cv2.BORDER_REFLECT)
+        relative = img / (conv + 1e-6)
+        # Back-project the ratio
+        estimate *= cv2.filter2D(relative, -1, psf_mirror, borderType=cv2.BORDER_REFLECT)
+    return estimate
+
 def unsharp_mask(img, ksize=(5,5), sigma=1.0, amount=1.5, thresh=0):
     blurred = cv2.GaussianBlur(img, ksize, sigma)
     sharp = float(amount+1)*img - float(amount)*blurred
@@ -169,12 +190,17 @@ def main():
     p.add_argument('--stack-method', choices=['average','median'], default='average')
     p.add_argument('--unsharp-amount', type=float, default=1.5)
     p.add_argument('--output', help="Output filename", default=default_output)
+    p.add_argument('--sr-upscale',        type=int,   default=1, help="Super-res upsample factor (e.g. 2)")
+    p.add_argument('--sr-iterations',     type=int,   default=0, help="RL deconvolution iterations (0=off)")
+    p.add_argument('--psf-size',          type=int,   default=5, help="PSF kernel size for deconvolution")
+    p.add_argument('--psf-sigma',         type=float, default=1.0, help="PSF σ for deconvolution")
     args = p.parse_args()
 
     # ensure Output dir exists
     out_dir = os.path.dirname(args.output) or '.'
     os.makedirs(out_dir, exist_ok=True)
 
+    print("Loading frames...")
     # if user didn’t override --output, derive it from the input name
     if args.output == default_output:
         if args.input_ser:
@@ -203,6 +229,19 @@ def main():
 
     aligned = align_ecc(good) if args.align_method=='ECC' else align_orb(good)
     stacked = stack_images(aligned, method=args.stack_method)
+
+    if args.sr_upscale > 1:
+        h, w = stacked.shape[:2]
+        # upsample with cubic interpolation
+        hr = cv2.resize(stacked, (w*args.sr_upscale, h*args.sr_upscale),
+                        interpolation=cv2.INTER_CUBIC)
+        # run RL deconvolution if requested
+        if args.sr_iterations > 0:
+            psf = generate_psf(size=args.psf_size, sigma=args.psf_sigma)
+            hr = richardson_lucy(hr, psf, iterations=args.sr_iterations)
+            hr = np.clip(hr, 0, 255).astype(np.uint8)
+        stacked = hr
+
     final   = unsharp_mask(stacked, amount=args.unsharp_amount)
     cv2.imwrite(args.output, final)
     print(f"Done → {args.output}")

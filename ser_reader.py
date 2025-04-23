@@ -66,7 +66,7 @@ class reader(object):
         
         frame = np.reshape(frame,(self.header.imageHeight,self.header.imageWidth,self.header.numPlanes))
         return frame
-print(__name__)
+
 if __name__ == '__main__':
     fname=r'F:\2019-12-23\Capture\00_39_12.ser'
     ser = reader(fname)
