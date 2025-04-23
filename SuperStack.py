@@ -1,25 +1,18 @@
 #!/usr/bin/env python3
 """
-stackSR.py – multi-frame super-resolution and denoising via stacking
+SuperStack.py – multi-frame super-resolution & sharpening via stacking
 
-Usage:
-  pip install opencv-python numpy tqdm
-  # will default to Input/ for frames and Output/stacked.png for output
-  ./stackSR.py \
-    [--input-folder PATH/to/images] \
-    [--input-video PATH/to/video.mp4] \
-    [--lap-thresh 100.0] \
-    [--top-percent 50] \
-    [--align-method ECC|ORB] \
-    [--stack-method average|median] \
-    [--unsharp-amount 1.5] \
-    [--output PATH/to/result.png]
+Supports: image folders, video files, .ser clips,  
++ classical RL super-res + wavelet sharpening  
+(No AI, pure signal processing)
 """
 
 import os, glob, argparse
 import cv2, numpy as np
 from tqdm import tqdm
-from ser_reader import reader #Credit to https://github.com/Copper280z/pySER-Reader.git
+from ser_reader import reader  # from pySER-Reader
+
+# ─── I/O ────────────────────────────────────────────────────────
 
 def load_images_from_folder(folder, exts=('*.jpg','*.png','*.tif')):
     files = []
@@ -41,177 +34,178 @@ def load_frames_from_video(video_path):
         yield frame
     cap.release()
 
+def load_frames_from_ser(path):
+    ser = reader(path)
+    frames = []
+    for i in range(ser.header.frameCount):
+        img = ser.getImg(i)
+        # demosaic / mono→BGR
+        if ser.header.numPlanes == 1:
+            cid = ser.header.colorID
+            if cid == 0:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            elif cid in (8,9,10,11):
+                code = {8:cv2.COLOR_BAYER_RG2BGR,
+                        9:cv2.COLOR_BAYER_GR2BGR,
+                        10:cv2.COLOR_BAYER_GB2BGR,
+                        11:cv2.COLOR_BAYER_BG2BGR}[cid]
+                img = cv2.cvtColor(img, code)
+            else:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        else:
+            cid = ser.header.colorID
+            if cid == 100:          # RGB→BGR
+                img = img[..., ::-1]
+        frames.append(img)
+    return frames
+
+# ─── QUALITY FILTER ────────────────────────────────────────────
+
 def laplacian_score(img):
     yuv = cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
-    y = yuv[...,0]
+    y   = yuv[...,0]
     return cv2.Laplacian(y, cv2.CV_64F).var()
 
 def filter_by_quality(imgs, lap_thresh=None, top_percent=None):
-    scores = [laplacian_score(im) for im in tqdm(imgs, desc="Scoring")]
-    imgs_ret = []
+    scores = [laplacian_score(im) for im in tqdm(imgs, desc="Scoring  ")]
     if lap_thresh is not None:
-        for im, s in zip(imgs, scores):
-            if s >= lap_thresh:
-                imgs_ret.append(im)
-    elif top_percent is not None:
-        n = int(len(imgs) * (top_percent/100.0))
+        return [im for im,s in zip(imgs,scores) if s>=lap_thresh]
+    if top_percent is not None:
+        n = int(len(imgs)*(top_percent/100))
         idx = np.argsort(scores)[-n:]
-        imgs_ret = [imgs[i] for i in sorted(idx)]
-    else:
-        imgs_ret = imgs
-    return imgs_ret
+        return [imgs[i] for i in sorted(idx)]
+    return imgs
+
+# ─── ALIGNMENT ─────────────────────────────────────────────────
 
 def align_ecc(imgs, iterations=5000, eps=1e-10):
     ref = imgs[0]
-    h, w = ref.shape[:2]
+    h,w = ref.shape[:2]
     ref_gray = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
     aligned = [ref]
     for im in tqdm(imgs[1:], desc="Aligning ECC"):
         gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
         M = np.eye(2,3, dtype=np.float32)
-        _, M = cv2.findTransformECC(ref_gray, gray, M,
-                                     cv2.MOTION_EUCLIDEAN,
-                                     (cv2.TERM_CRITERIA_EPS |
-                                      cv2.TERM_CRITERIA_COUNT,
-                                      iterations, eps))
-        warped = cv2.warpAffine(im, M, (w,h),
-                                flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
+        _, M = cv2.findTransformECC(
+            ref_gray, gray, M, cv2.MOTION_EUCLIDEAN,
+            (cv2.TERM_CRITERIA_EPS|cv2.TERM_CRITERIA_COUNT, iterations, eps)
+        )
+        warped = cv2.warpAffine(
+            im, M, (w,h),
+            flags=cv2.INTER_LINEAR+cv2.WARP_INVERSE_MAP
+        )
         aligned.append(warped)
     return aligned
 
 def align_orb(imgs, keep_kp=5000, match_ratio=0.9):
     ref = imgs[0]
-    h, w = ref.shape[:2]
+    h,w = ref.shape[:2]
     ref_gray = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
     orb = cv2.ORB_create(keep_kp)
-    kp1, des1 = orb.detectAndCompute(ref_gray, None)
+    kp1,des1 = orb.detectAndCompute(ref_gray, None)
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
     aligned = [ref]
     for im in tqdm(imgs[1:], desc="Aligning ORB"):
         gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
-        kp2, des2 = orb.detectAndCompute(gray, None)
-        matches = sorted(bf.match(des1, des2), key=lambda x: x.distance)
-        keep = matches[:int(len(matches)*match_ratio)]
+        kp2,des2 = orb.detectAndCompute(gray, None)
+        matches = sorted(bf.match(des1, des2), key=lambda m: m.distance)
+        keep    = matches[:int(len(matches)*match_ratio)]
         src = np.float32([kp1[m.queryIdx].pt for m in keep]).reshape(-1,1,2)
         dst = np.float32([kp2[m.trainIdx].pt for m in keep]).reshape(-1,1,2)
-        M, _ = cv2.findHomography(dst, src, cv2.RANSAC)
+        M,_ = cv2.findHomography(dst, src, cv2.RANSAC)
         warped = cv2.warpPerspective(im, M, (w,h))
         aligned.append(warped)
     return aligned
 
+# ─── STACK & SHARPEN ────────────────────────────────────────────
+
 def stack_images(imgs, method='average'):
     arr = np.stack([im.astype(np.float32) for im in imgs], axis=0)
-    if method == 'median':
-        res = np.median(arr, axis=0)
-    else:
-        res = np.mean(arr, axis=0)
-    return np.clip(res, 0, 255).astype(np.uint8)
-
-def generate_psf(size=5, sigma=1.0):
-    """Create a Gaussian PSF kernel of given size & σ."""
-    g = cv2.getGaussianKernel(size, sigma)
-    return g @ g.T      # outer product → 2D kernel
-
-def richardson_lucy(img, psf, iterations=10):
-    """
-    Perform Richardson–Lucy deconvolution on a uint8 BGR image.
-    Returns float32 image (0–255) that you should clip & cast.
-    """
-    img = img.astype(np.float32) + 1e-6
-    estimate = cv2.resize(img, None, fx=1, fy=1)  # copy as float32
-    psf_mirror = psf[::-1, ::-1]
-    for _ in range(iterations):
-        # Convolve estimate with PSF
-        conv = cv2.filter2D(estimate, -1, psf, borderType=cv2.BORDER_REFLECT)
-        relative = img / (conv + 1e-6)
-        # Back-project the ratio
-        estimate *= cv2.filter2D(relative, -1, psf_mirror, borderType=cv2.BORDER_REFLECT)
-    return estimate
+    res = np.median(arr,axis=0) if method=='median' else np.mean(arr,axis=0)
+    return np.clip(res,0,255).astype(np.uint8)
 
 def unsharp_mask(img, ksize=(5,5), sigma=1.0, amount=1.5, thresh=0):
     blurred = cv2.GaussianBlur(img, ksize, sigma)
     sharp = float(amount+1)*img - float(amount)*blurred
-    sharp = np.clip(sharp, 0, 255).astype(np.uint8)
-    if thresh > 0:
-        low_contrast = np.abs(img - blurred) < thresh
-        sharp[low_contrast] = img[low_contrast]
+    sharp = np.clip(sharp,0,255).astype(np.uint8)
+    if thresh>0:
+        mask = np.abs(img-blurred)<thresh
+        sharp[mask] = img[mask]
     return sharp
 
-def load_frames_from_ser(path):
-    ser = reader(path)  # parses header & metadata
-    frames = []
-    for i in range(ser.header.frameCount):
-        img = ser.getImg(i)  # H×W×numPlanes uint8/uint16
+# ─── SUPER-RESOLUTION (RL) ───────────────────────────────────────
 
-        # If single‐plane, it’s mono (colorID=0) or Bayer (8–11)
-        if ser.header.numPlanes == 1:
-            cid = ser.header.colorID
-            if cid == 0:
-                # pure mono → convert to BGR so rest of pipeline sees 3 channels
-                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-            elif cid in (8,9,10,11):
-                # standard Bayer patterns → choose correct demosaic code
-                bayer_code = {
-                  8:  cv2.COLOR_BAYER_RG2BGR,   # RGGB
-                  9:  cv2.COLOR_BAYER_GR2BGR,   # GRBG
-                  10: cv2.COLOR_BAYER_GB2BGR,   # GBRG
-                  11: cv2.COLOR_BAYER_BG2BGR    # BGGR
-                }[cid]
-                img = cv2.cvtColor(img, bayer_code)
-            else:
-                # unknown single‐plane → treat as gray
-                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+def generate_psf(size=5, sigma=1.0):
+    g = cv2.getGaussianKernel(size, sigma)
+    return g @ g.T
 
-        # If three planes, it’s already color (100=RGB, 101=BGR)
-        else:
-            cid = ser.header.colorID
-            if cid == 100:
-                # convert RGB→BGR
-                img = img[..., ::-1]
-            # if 101 (BGR) we’re good
+def richardson_lucy(img, psf, iterations=10):
+    img_f = img.astype(np.float32) + 1e-6
+    estimate = img_f.copy()
+    psf_m  = psf[::-1, ::-1]
+    for _ in tqdm(range(iterations), desc="RL Deconv"):
+        conv = cv2.filter2D(estimate, -1, psf, borderType=cv2.BORDER_REFLECT)
+        rel  = img_f/(conv+1e-6)
+        estimate *= cv2.filter2D(rel, -1, psf_m, borderType=cv2.BORDER_REFLECT)
+    return estimate
 
-        frames.append(img)
+# ─── WAVELET SHARPENING ─────────────────────────────────────────
 
-    return frames
+def wavelet_sharpen(img, levels=3, boost=1.2):
+    # build Gaussian pyramid
+    G = [img.copy()]
+    for i in tqdm(range(levels), desc="Wavelet↓"):
+        G.append(cv2.pyrDown(G[-1]))
+    # build Laplacian pyramid
+    L = []
+    for i in range(levels):
+        up = cv2.pyrUp(G[i+1], dstsize=(G[i].shape[1],G[i].shape[0]))
+        L.append(cv2.subtract(G[i], up))
+    L.append(G[-1])
+    # boost all but the smallest residual
+    for i in tqdm(range(levels), desc="Boosting"):
+        L[i] = cv2.multiply(L[i], boost)
+    # reconstruct
+    rec = L[-1]
+    for i in reversed(range(levels)):
+        rec = cv2.pyrUp(rec, dstsize=(L[i].shape[1],L[i].shape[0]))
+        rec = cv2.add(rec, L[i])
+    return np.clip(rec,0,255).astype(np.uint8)
+
+# ─── MAIN ────────────────────────────────────────────────────────
 
 def main():
     default_input  = 'Input'
-    default_output = os.path.join('Output', 'stacked.png')
+    default_output = os.path.join('Output','stacked.png')
 
-    p = argparse.ArgumentParser(prog="stackSR",
-        description="Stacking & super-res without AI (now .SER-aware)")
+    p = argparse.ArgumentParser(prog="SuperStack",
+        description="StackSR + RL-superres + wavelet sharpening")
     g = p.add_mutually_exclusive_group()
     g.add_argument('--input-folder', help="Folder of images", default=default_input)
-    g.add_argument('--input-video',  help="Input video file")
-    g.add_argument('--input-ser',    help="Input .ser file")
-    p.add_argument('--lap-thresh',  type=float, help="Laplacian variance blur threshold")
-    p.add_argument('--top-percent', type=float, help="Keep top P% sharpest frames")
+    g.add_argument('--input-video',  help="Video file")
+    g.add_argument('--input-ser',    help=".ser file")
+    p.add_argument('--lap-thresh',  type=float, help="Laplacian blur threshold")
+    p.add_argument('--top-percent', type=float, help="Top P% by sharpness")
     p.add_argument('--align-method', choices=['ECC','ORB'], default='ECC')
     p.add_argument('--stack-method', choices=['average','median'], default='average')
     p.add_argument('--unsharp-amount', type=float, default=1.5)
-    p.add_argument('--output', help="Output filename", default=default_output)
-    p.add_argument('--sr-upscale',        type=int,   default=1, help="Super-res upsample factor (e.g. 2)")
-    p.add_argument('--sr-iterations',     type=int,   default=0, help="RL deconvolution iterations (0=off)")
-    p.add_argument('--psf-size',          type=int,   default=5, help="PSF kernel size for deconvolution")
-    p.add_argument('--psf-sigma',         type=float, default=1.0, help="PSF σ for deconvolution")
+    p.add_argument('--sr-upscale',    type=int,   default=1, help="Upscale factor")
+    p.add_argument('--sr-iterations', type=int,   default=0, help="RL deconv iters")
+    p.add_argument('--psf-size',      type=int,   default=5)
+    p.add_argument('--psf-sigma',     type=float, default=1.0)
+    p.add_argument('--wavelet-levels',type=int,   default=0, help="Enable wavelet sharpen")
+    p.add_argument('--wavelet-boost', type=float, default=1.2, help="Wavelet gain")
+    p.add_argument('--output',        help="Output file", default=default_output)
     args = p.parse_args()
 
-    # ensure Output dir exists
-    out_dir = os.path.dirname(args.output) or '.'
-    os.makedirs(out_dir, exist_ok=True)
+    # derive output name from input if left default
+    if args.output==default_output:
+        base = args.input_ser or args.input_video or args.input_folder
+        base = os.path.splitext(os.path.basename(base.rstrip("/\\")))[0]
+        args.output = os.path.join(os.path.dirname(args.output), f"{base}.png")
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
-    print("Loading frames...")
-    # if user didn’t override --output, derive it from the input name
-    if args.output == default_output:
-        if args.input_ser:
-            base = os.path.splitext(os.path.basename(args.input_ser))[0]
-        elif args.input_video:
-            base = os.path.splitext(os.path.basename(args.input_video))[0]
-        else:
-            base = os.path.basename(os.path.normpath(args.input_folder))
-        args.output = os.path.join(out_dir, f"{base}.png")
-
-    # Load frames based on input type:
+    print("→ Loading frames")
     if args.input_ser:
         frames = load_frames_from_ser(args.input_ser)
     elif args.input_video:
@@ -220,31 +214,49 @@ def main():
         frames = list(load_images_from_folder(args.input_folder))
 
     if not frames:
-        raise RuntimeError("No frames loaded – check your inputs.")
+        raise RuntimeError("No frames found.")
+
+    print("→ Filtering by sharpness")
     good = filter_by_quality(frames,
                              lap_thresh=args.lap_thresh,
                              top_percent=args.top_percent)
     if not good:
-        raise RuntimeError("All frames filtered out – loosen criteria.")
+        raise RuntimeError("All frames filtered out.")
 
-    aligned = align_ecc(good) if args.align_method=='ECC' else align_orb(good)
+    print("→ Aligning frames")
+    aligned = (align_ecc(good) if args.align_method=='ECC'
+               else align_orb(good))
+
+    print("→ Stacking")
     stacked = stack_images(aligned, method=args.stack_method)
 
-    if args.sr_upscale > 1:
-        h, w = stacked.shape[:2]
-        # upsample with cubic interpolation
-        hr = cv2.resize(stacked, (w*args.sr_upscale, h*args.sr_upscale),
-                        interpolation=cv2.INTER_CUBIC)
-        # run RL deconvolution if requested
-        if args.sr_iterations > 0:
+    # super-res step
+    if args.sr_upscale>1:
+        print(f"→ Upscaling ×{args.sr_upscale}")
+        h,w = stacked.shape[:2]
+        stacked = cv2.resize(
+            stacked, (w*args.sr_upscale,h*args.sr_upscale),
+            interpolation=cv2.INTER_CUBIC
+        )
+        if args.sr_iterations>0:
+            print(f"→ RL deconvolution ({args.sr_iterations} iters)")
             psf = generate_psf(size=args.psf_size, sigma=args.psf_sigma)
-            hr = richardson_lucy(hr, psf, iterations=args.sr_iterations)
-            hr = np.clip(hr, 0, 255).astype(np.uint8)
-        stacked = hr
+            stacked = richardson_lucy(stacked, psf, iterations=args.sr_iterations)
+            stacked = np.clip(stacked,0,255).astype(np.uint8)
 
-    final   = unsharp_mask(stacked, amount=args.unsharp_amount)
+    # wavelet sharpen
+    if args.wavelet_levels>0:
+        print(f"→ Wavelet sharpen ({args.wavelet_levels} levels ×{args.wavelet_boost})")
+        stacked = wavelet_sharpen(stacked,
+                                  levels=args.wavelet_levels,
+                                  boost=args.wavelet_boost)
+
+    # final unsharp mask
+    print("→ Final unsharp mask")
+    final = unsharp_mask(stacked, amount=args.unsharp_amount)
+
     cv2.imwrite(args.output, final)
-    print(f"Done → {args.output}")
+    print(f"✅ Done → {args.output}")
 
 if __name__ == '__main__':
     main()
