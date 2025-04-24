@@ -78,7 +78,7 @@ def filter_by_quality(imgs, lap_thresh=None, top_percent=None):
 
 # ─── ALIGNMENT ─────────────────────────────────────────────────
 
-def align_ecc(imgs, iterations=5000, eps=1e-10):
+def align_ecc(imgs, iterations=1000, eps=1e-6):
     ref = imgs[0]
     h,w = ref.shape[:2]
     ref_gray = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
